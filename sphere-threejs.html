@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Interactive Sphere – Three.js Embed Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #fff;
+      font-family: 'Courier New', monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+
+    /* ── The only thing you need in your page ── */
+    #sphere-mount {
+      width: 700px;
+      height: 700px;
+      max-width: 100vw;
+      max-height: 100vw;
+    }
+
+    /* Demo label */
+    .embed-note {
+      margin-top: 24px;
+      font-size: 11px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: #aaa;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ① Put this div wherever you want the sphere -->
+  <div id="sphere-mount"></div>
+  <p class="embed-note">Hover · Click &amp; drag to rotate</p>
+
+  <!-- ② Three.js from CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+  <!-- ③ Drop this script block into your page -->
+  <script>
+  (function() {
+    /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+       InteractiveSphere – embeddable Three.js module
+       Usage: just include this script after three.min.js
+       and have a <div id="sphere-mount"> in your HTML.
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+    const MOUNT_ID      = 'sphere-mount';   // ← change to match your div id
+    const NUM_LINES     = 135;
+    const POINTS        = 280;
+    const RADIUS        = 2.2;
+    const WAVE_SPEED    = 7;
+    const WAVE_INTENSITY= 0.28;
+    const INTERACT_R    = 1.9;              // interaction radius in world units
+    const EXPAND_INTENSITY = 0.22;
+    const BASE_COLOR    = new THREE.Color(0.137, 0.137, 0.157);
+
+    // ── Setup ──────────────────────────────────────
+    const mount = document.getElementById(MOUNT_ID);
+    if (!mount) { console.error('[Sphere] Mount element not found:', MOUNT_ID); return; }
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setClearColor(0xffffff, 1);
+    mount.appendChild(renderer.domElement);
+
+    const scene  = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+    camera.position.z = 7;
+
+    // ── State ──────────────────────────────────────
+    let time         = 0;
+    let pressureScale= 0;
+    let isDown       = false;
+    let mouse        = new THREE.Vector2(-999, -999);   // NDC
+    let mouseWorld   = new THREE.Vector3(-999, -999, 0);
+    let mouseActive  = false;
+
+    let rotX = 0, rotY = 0;
+    let targetRotX = 0, targetRotY = 0;
+    let autoRotX = 0, autoRotY = 0;
+    let lastX = 0, lastY = 0;
+
+    // ── Build line geometries ──────────────────────
+    const lines = [];
+    const origPositions = []; // flat Float32Array per line (rest positions)
+
+    for (let i = 0; i < NUM_LINES; i++) {
+      const phi   = (i / NUM_LINES) * Math.PI;
+      const count = POINTS + 1;
+      const pos   = new Float32Array(count * 3);
+      const orig  = new Float32Array(count * 3);
+
+      for (let j = 0; j < count; j++) {
+        const theta = (j / POINTS) * Math.PI * 2;
+        const x = RADIUS * Math.sin(phi) * Math.cos(theta);
+        const y = RADIUS * Math.sin(phi) * Math.sin(theta);
+        const z = RADIUS * Math.cos(phi);
+        pos[j*3]   = orig[j*3]   = x;
+        pos[j*3+1] = orig[j*3+1] = y;
+        pos[j*3+2] = orig[j*3+2] = z;
+      }
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+
+      const mat = new THREE.LineBasicMaterial({
+        color: BASE_COLOR.clone(),
+        linewidth: 1
+      });
+
+      const line = new THREE.Line(geo, mat);
+      scene.add(line);
+      lines.push({ line, geo, mat, phi, linePhase: i * 0.8, lineFreq: 0 });
+      origPositions.push(orig);
+    }
+
+    // ── Raycaster plane at z=0 for world mouse ─────
+    const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+    const raycaster = new THREE.Raycaster();
+
+    function updateMouseWorld() {
+      raycaster.setFromCamera(mouse, camera);
+      raycaster.ray.intersectPlane(plane, mouseWorld);
+    }
+
+    // ── Resize ─────────────────────────────────────
+    function resize() {
+      const w = mount.clientWidth;
+      const h = mount.clientHeight;
+      renderer.setSize(w, h);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    resize();
+    new ResizeObserver(resize).observe(mount);
+
+    // ── Input ──────────────────────────────────────
+    const el = renderer.domElement;
+
+    function toNDC(clientX, clientY) {
+      const rect = el.getBoundingClientRect();
+      return {
+        x:  ((clientX - rect.left)  / rect.width)  * 2 - 1,
+        y: -((clientY - rect.top)   / rect.height) * 2 + 1
+      };
+    }
+
+    el.addEventListener('mousedown', e => {
+      isDown = true;
+      lastX = e.clientX; lastY = e.clientY;
+    });
+    window.addEventListener('mouseup', () => { isDown = false; });
+
+    el.addEventListener('mousemove', e => {
+      const ndc = toNDC(e.clientX, e.clientY);
+      mouse.set(ndc.x, ndc.y);
+      mouseActive = true;
+      if (isDown) {
+        targetRotY += (e.clientX - lastX) * 0.005;
+        targetRotX += (e.clientY - lastY) * 0.005;
+        lastX = e.clientX; lastY = e.clientY;
+      }
+    });
+
+    el.addEventListener('mouseleave', () => { mouseActive = false; });
+
+    // Touch support
+    el.addEventListener('touchstart', e => {
+      isDown = true;
+      lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+    }, { passive: true });
+    window.addEventListener('touchend', () => { isDown = false; });
+    el.addEventListener('touchmove', e => {
+      const t = e.touches[0];
+      const ndc = toNDC(t.clientX, t.clientY);
+      mouse.set(ndc.x, ndc.y);
+      mouseActive = true;
+      if (isDown) {
+        targetRotY += (t.clientX - lastX) * 0.005;
+        targetRotX += (t.clientY - lastY) * 0.005;
+        lastX = t.clientX; lastY = t.clientY;
+      }
+      e.preventDefault();
+    }, { passive: false });
+
+    // ── Animate ────────────────────────────────────
+    const _c = new THREE.Color();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      time += 0.008;
+
+      // Auto-rotation
+      autoRotY += 0.001;
+      autoRotX += 0.0005;
+
+      // Smooth manual rotation
+      rotX += (targetRotX - rotX) * 0.1;
+      rotY += (targetRotY - rotY) * 0.1;
+
+      // Sphere group rotation
+      const totalRotX = rotX + autoRotX;
+      const totalRotY = rotY + autoRotY;
+
+      // Pressure
+      pressureScale += ((isDown ? 1 : 0) - pressureScale) * 0.1;
+
+      if (mouseActive) updateMouseWorld();
+
+      // Base wave frequency (slowly evolving)
+      const baseFreq = 12 + Math.sin(time * 0.3) * 2;
+
+      // Estimated latitude of mouse hit (y in world space → phi)
+      const relY = THREE.MathUtils.clamp(mouseWorld.y / RADIUS, -1, 1);
+      const estimatedMousePhi = Math.acos(-relY); // y axis is "up" in Three.js
+
+      for (let i = 0; i < NUM_LINES; i++) {
+        const { line, geo, mat, phi, linePhase } = lines[i];
+        const lineFreq = Math.round(baseFreq + Math.sin(i * 0.2) * 1.5);
+        const orig = origPositions[i];
+        const pos  = geo.attributes.position.array;
+        const count = POINTS + 1;
+
+        let maxForce = 0;
+
+        for (let j = 0; j < count; j++) {
+          const theta = (j / POINTS) * Math.PI * 2;
+
+          // Rotate original rest point to screen space to measure dist to mouse
+          let ox = orig[j*3], oy = orig[j*3+1], oz = orig[j*3+2];
+
+          // Apply sphere rotation
+          // Rotate Y
+          let rx = ox * Math.cos(totalRotY) + oz * Math.sin(totalRotY);
+          let rz = -ox * Math.sin(totalRotY) + oz * Math.cos(totalRotY);
+          // Rotate X
+          let ry2 = oy * Math.cos(totalRotX) - rz * Math.sin(totalRotX);
+          let rz2 = oy * Math.sin(totalRotX) + rz * Math.cos(totalRotX);
+
+          // ── Back-face cull: hide points facing away from camera ──
+          // Allow a small overlap past the equator (rz2 > 0.18) so the
+          // silhouette edge looks full and round rather than sharply clipped
+          if (rz2 > 0.18) {
+            pos[j*3]   = NaN;
+            pos[j*3+1] = NaN;
+            pos[j*3+2] = NaN;
+            continue;
+          }
+
+          // Distance in world space to mouse (projected on z=0 plane)
+          const dx = rx - mouseWorld.x;
+          const dy = ry2 - mouseWorld.y;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+
+          let currentPhi = phi;
+          let wx = ox, wy = oy, wz = oz;
+
+          if (mouseActive && dist < INTERACT_R) {
+            const normDist = dist / INTERACT_R;
+            const force = Math.pow(1 - normDist, 1.2);
+            maxForce = Math.max(maxForce, force);
+
+            const polarFade = Math.sin(phi);
+
+            // Expand lines on click
+            if (pressureScale > 0.01) {
+              const pushDir = (phi < estimatedMousePhi) ? -1 : 1;
+              const distToRef = Math.abs(phi - estimatedMousePhi);
+              const softPush = Math.min(1, distToRef * 5);
+              currentPhi += pushDir * force * pressureScale * EXPAND_INTENSITY * polarFade * softPush;
+            }
+
+            wx = RADIUS * Math.sin(currentPhi) * Math.cos(theta);
+            wy = RADIUS * Math.sin(currentPhi) * Math.sin(theta);
+            wz = RADIUS * Math.cos(currentPhi);
+
+            // Wave distortion
+            const mainWave = Math.sin(theta * lineFreq + linePhase + time * WAVE_SPEED);
+            const subWave  = Math.sin(theta * (lineFreq * 0.5) + time * 2) * 0.2;
+            const waveAmt  = (mainWave + subWave) * WAVE_INTENSITY * force * (1 + pressureScale) * polarFade;
+
+            const mag = Math.sqrt(wx*wx + wy*wy + wz*wz) || 1;
+            wx += (wx / mag) * waveAmt;
+            wy += (wy / mag) * waveAmt;
+            wz += (wz / mag) * waveAmt;
+          }
+
+          pos[j*3]   = wx;
+          pos[j*3+1] = wy;
+          pos[j*3+2] = wz;
+        }
+
+        geo.attributes.position.needsUpdate = true;
+
+        // Color
+        if (maxForce < 0.01) {
+          mat.color.copy(BASE_COLOR);
+        } else {
+          const r = Math.sin(time * 1.2 + i * 0.1) * 0.43 + 0.53;
+          const g = Math.sin(time * 1.2 + 2 + i * 0.1) * 0.43 + 0.53;
+          const b = Math.sin(time * 1.2 + 4 + i * 0.1) * 0.43 + 0.53;
+          mat.color.setRGB(
+            BASE_COLOR.r + (r - BASE_COLOR.r) * maxForce,
+            BASE_COLOR.g + (g - BASE_COLOR.g) * maxForce,
+            BASE_COLOR.b + (b - BASE_COLOR.b) * maxForce
+          );
+        }
+
+        // Apply rotation to the whole scene via the line's matrix
+        line.rotation.x = totalRotX;
+        line.rotation.y = totalRotY;
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+  })();
+  </script>
+
+</body>
+</html>
